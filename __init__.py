@@ -29,6 +29,7 @@ from .tournament import (
     DEFAULT_R32_BRACKET,
 )
 from .odds import compare_market, devig_proportional, devig_shin, overround
+from .fit import load_results, compute_weights, fit_dixon_coles, FitResult
 
 
 def groups_from_teams(teams: dict) -> dict[str, list[str]]:
@@ -48,4 +49,5 @@ __all__ = [
     "select_qualifiers", "groups_from_teams", "GROUP_LETTERS",
     "DEFAULT_R32_BRACKET", "compare_market", "devig_proportional",
     "devig_shin", "overround",
+    "load_results", "compute_weights", "fit_dixon_coles", "FitResult",
 ]
