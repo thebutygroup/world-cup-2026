@@ -43,6 +43,33 @@ class Team:
     group: str | None = None
 
 
+@dataclass(frozen=True)
+class Surface:
+    """
+    A per-match pitch effect. The default is identity (no effect), so the
+    surface dimension is OFF until calibration data sets its magnitude.
+
+    pace        : multiplier on total goal expectation. <1 = slower pitch /
+                  fewer goals; 1.0 = neutral.
+    compression : in [0, 1]; pulls the two teams' goal expectations toward
+                  their shared mean, shrinking supremacy and so raising the
+                  draw/upset probability. 0.0 = neutral.
+    name        : optional label (venue or surface tag).
+
+    Both act in log space so they compose cleanly and the pace effect is
+    level-only while compression is gap-only:
+        log(lambda') = m + (1 - compression) * (log(lambda) - m) + log(pace)
+    where m is the mean of the two teams' log expectations.
+    """
+    pace: float = 1.0
+    compression: float = 0.0
+    name: str | None = None
+
+    @property
+    def is_identity(self) -> bool:
+        return self.pace == 1.0 and self.compression == 0.0
+
+
 def load_teams(path: str) -> dict[str, Team]:
     """Load a CSV with columns: name, attack, defence, [group]."""
     df = pd.read_csv(path)
@@ -99,11 +126,19 @@ class MatchModel:
     _cache: dict = field(default_factory=dict, repr=False)
 
     # ---- expected goals -------------------------------------------------
-    def lambdas(self, home: str, away: str, neutral: bool = True) -> tuple[float, float]:
+    def lambdas(self, home: str, away: str, neutral: bool = True,
+                surface: "Surface | None" = None) -> tuple[float, float]:
         h, a = self.teams[home], self.teams[away]
         adv = 0.0 if neutral else self.home_adv
         lam_h = math.exp(self.base + h.attack - a.defence + adv)
         lam_a = math.exp(self.base + a.attack - h.defence)
+        if surface is not None and not surface.is_identity:
+            Lh, La = math.log(lam_h), math.log(lam_a)
+            m = 0.5 * (Lh + La)
+            c = surface.compression
+            lp = math.log(surface.pace)
+            lam_h = math.exp(m + (1.0 - c) * (Lh - m) + lp)
+            lam_a = math.exp(m + (1.0 - c) * (La - m) + lp)
         return lam_h, lam_a
 
     # ---- scoreline distribution ----------------------------------------
@@ -124,11 +159,12 @@ class MatchModel:
         mat /= mat.sum()
         return mat
 
-    def _cumulative(self, home: str, away: str, neutral: bool) -> tuple[np.ndarray, int]:
-        key = (home, away, neutral)
+    def _cumulative(self, home: str, away: str, neutral: bool,
+                    surface: "Surface | None" = None) -> tuple[np.ndarray, int]:
+        key = (home, away, neutral, surface)
         cached = self._cache.get(key)
         if cached is None:
-            lam_h, lam_a = self.lambdas(home, away, neutral)
+            lam_h, lam_a = self.lambdas(home, away, neutral, surface)
             mat = self._score_matrix(lam_h, lam_a)
             cum = np.cumsum(mat.ravel())
             cum[-1] = 1.0  # guard against fp drift
@@ -137,25 +173,28 @@ class MatchModel:
         return cached
 
     # ---- sampling -------------------------------------------------------
-    def sample_score(self, home: str, away: str, neutral: bool = True) -> tuple[int, int]:
-        cum, ncols = self._cumulative(home, away, neutral)
+    def sample_score(self, home: str, away: str, neutral: bool = True,
+                     surface: "Surface | None" = None) -> tuple[int, int]:
+        cum, ncols = self._cumulative(home, away, neutral, surface)
         idx = int(np.searchsorted(cum, _rng.random()))
         return divmod(idx, ncols)
 
     def sample_scores(
-        self, home: str, away: str, size: int, neutral: bool = True
+        self, home: str, away: str, size: int, neutral: bool = True,
+        surface: "Surface | None" = None
     ) -> np.ndarray:
         """Vectorised: returns an (size, 2) int array of [goals_h, goals_a]."""
-        cum, ncols = self._cumulative(home, away, neutral)
+        cum, ncols = self._cumulative(home, away, neutral, surface)
         idx = np.searchsorted(cum, _rng.random(size))
         return np.column_stack(divmod(idx, ncols))
 
     # ---- analytic outcome probabilities (handy for sanity checks) -------
     def outcome_probs(
-        self, home: str, away: str, neutral: bool = True
+        self, home: str, away: str, neutral: bool = True,
+        surface: "Surface | None" = None
     ) -> tuple[float, float, float]:
         """Returns (P_home_win, P_draw, P_away_win) over 90 minutes."""
-        lam_h, lam_a = self.lambdas(home, away, neutral)
+        lam_h, lam_a = self.lambdas(home, away, neutral, surface)
         mat = self._score_matrix(lam_h, lam_a)
         p_home = np.tril(mat, -1).sum()
         p_draw = np.trace(mat)
@@ -164,19 +203,20 @@ class MatchModel:
 
 
 def knockout_winner(
-    model: MatchModel, home: str, away: str, neutral: bool = True
+    model: MatchModel, home: str, away: str, neutral: bool = True,
+    surface: "Surface | None" = None
 ) -> str:
     """
     Resolve a knockout tie: 90', then 30' extra time (rates scaled 1/3),
     then a penalty shootout weighted very mildly by attacking strength.
     Returns the winning team name.
     """
-    gh, ga = model.sample_score(home, away, neutral)
+    gh, ga = model.sample_score(home, away, neutral, surface)
     if gh != ga:
         return home if gh > ga else away
 
     # Extra time: independent Poisson at one-third of the 90' rates.
-    lam_h, lam_a = model.lambdas(home, away, neutral)
+    lam_h, lam_a = model.lambdas(home, away, neutral, surface)
     eh = int(_rng.poisson(lam_h / 3.0))
     ea = int(_rng.poisson(lam_a / 3.0))
     if eh != ea:
