@@ -49,19 +49,55 @@ odds = {"Spain": 5.5, "Argentina": 6.5, "France": 7.0, ...}  # full market!
 print(wc.compare_market(odds, probs["P(win)"].to_dict(), method="shin"))
 ```
 
+## Fitting real ratings (the part that matters most)
+
+The single biggest accuracy lever is replacing the synthetic ratings with
+ones fitted to real results. `worldcup_mc/fit.py` does this by weighted
+maximum likelihood:
+
+```bash
+python fetch_data.py     # downloads results.csv from martj42 (networked machine)
+python fit_ratings.py    # -> worldcup_mc/data/teams_fitted.csv + params_fitted.json
+```
+
+```python
+from worldcup_mc import load_results, compute_weights, fit_dixon_coles
+df  = load_results("worldcup_mc/data/results.csv", min_date="2014-01-01")
+w   = compute_weights(df, asof="2026-06-11", half_life_days=730, friendly_weight=0.3)
+fit = fit_dixon_coles(df, w, ridge=0.05)
+model = fit.to_match_model()      # base/home_adv/rho all estimated
+```
+
+Key knobs (all to be tuned against a backtest, not guessed):
+
+- **`half_life_days`** — exponential time decay. ~2 years by default; smooth
+  decay rather than a hard cutoff, so old friendlies still bridge the
+  confederations a qualification-only dataset would sever.
+- **`friendly_weight`** — friendlies down-weighted, not discarded.
+- **`ridge`** — shrinks sparse/minnow teams toward the average (cheap
+  Bayesian-prior-toward-mean); raise it when a team has few games.
+
+## Data sources
+
+`worldcup_mc/data/SOURCES.csv` is the full manifest with URLs, licences and
+what each layer feeds. Verified available as of June 2026:
+
+- **Match results** — `martj42/international_results` (GitHub raw CSV, ~49k
+  men’s internationals). The one required input. `fetch_data.py` pulls it.
+- **Club Elo** — `api.clubelo.com` (free CSV API) for league-strength
+  calibration in the later player-based prior.
+- **2026 hosts** — `host_advantage_2026.csv` (USA, Canada, Mexico) for
+  applying a non-neutral home edge.
+
+Secondary sources for the player layer / backtest (Transfermarkt squad
+values, FBref/Understat xG, Football-Data.co.uk historical odds) are listed
+with access caveats — note Transfermarkt scraping is against its ToS.
+
 ## Plugging in real data (what to replace)
 
-The package runs out of the box on **synthetic placeholder data**. For a
-real model, swap in:
-
-- **Ratings.** `teams_sample.csv` ratings are made up. Use fitted
-  attack/defence parameters, or convert a single power rating (World
-  Football Elo etc.) with `attack_defence_from_rating()`. Best practice is
-  to fit `base`, `home_adv`, `rho` and per-team attack/defence to recent
-  international results by maximum likelihood (with Dixon–Coles time
-  weighting) rather than hand-setting them.
-- **The draw.** The `group` column and `groups_from_teams()` use an
-  illustrative draw, not the official December 5 groups.
+- **Ratings.** `teams_sample.csv` is synthetic (attack == defence for every
+  team). Fit real ones with `fit.py` as above, or convert a single power
+  rating with `attack_defence_from_rating()`.
 - **The R32 bracket.** `DEFAULT_R32_BRACKET` is structurally valid but not
   the official pairing, and `assign_third_slots()` routes the eight best
   thirds by rank rather than FIFA’s fixed combination table. Replace both
@@ -89,7 +125,13 @@ worldcup_mc/
   model.py           Dixon-Coles match model + sampling
   tournament.py      group/knockout structure + Monte Carlo loop
   odds.py            de-vig + value comparison
-  data/teams_sample.csv
+  fit.py             time-decay Dixon-Coles MLE ratings fitter
+  data/
+    teams_sample.csv         synthetic placeholder ratings/draw
+    SOURCES.csv              data-source manifest (URLs, licences)
+    host_advantage_2026.csv  host nations + suggested home edge
+fetch_data.py        downloads real results.csv (run on networked machine)
+fit_ratings.py       fetch -> fit -> write teams_fitted.csv
 make_sample_data.py  regenerates the placeholder ratings/draw
-run_example.py       end-to-end demo
+run_example.py       end-to-end simulation + odds demo
 ```
