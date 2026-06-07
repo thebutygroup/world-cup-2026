@@ -104,6 +104,84 @@ with access caveats — note Transfermarkt scraping is against its ToS.
   for a true-to-draw bracket — these only affect *who plays whom* in the
   knockouts, not the match model.
 
+## Pitch surface dimension
+
+`worldcup_mc/data/venues_2026.csv` carries a preliminary per-venue
+`surface_risk_1to5`, and the model can apply a per-match `Surface` that
+models a poor pitch as a *variance compressor*: `pace` (<1) lowers total
+goals and `compression` (0..1) pulls the two teams’ expectations together,
+raising the draw/upset probability.
+
+**It is OFF by default.** `load_venue_surfaces(..., effect_strength=0.0)`
+returns identity surfaces, and `MatchModel` with no surface is unchanged.
+Turn it up only once data sets the size:
+
+```python
+from worldcup_mc import load_venue_surfaces, calibrate_surface, Surface
+m.outcome_probs("Spain", "Morocco", surface=Surface(pace=0.85, compression=0.2))
+
+# estimate a surface from matches played on it (warm-ups, then group games):
+surf, info = calibrate_surface(matches_df, baseline_model)  # shrinks to identity
+```
+
+`calibrate_surface` shrinks toward “no effect” by `n/(n+pseudocount)`, so a
+handful of friendlies barely move the model — by design, the estimate
+tightens as real matches accumulate. Wiring surfaces into the full
+tournament needs the match → venue schedule (next step); the magnitudes in
+`surface_from_risk` are placeholders until calibrated.
+
+## Cohesion signal: shots on target per wage (weak prior, off by default)
+
+`worldcup_mc/cohesion.py` builds a team “are they gelling?” signal: shots on
+target per £m of on-field wages. The thesis: a big wage bill generating few
+shots on target may be individuals, not a team — an early, exploitable
+disparity that we expect to correct as they gel. So it’s treated as a weak
+prior, not a verdict.
+
+```python
+from worldcup_mc import (load_wages, impute_floor, team_wage_bill,
+                         rolling_stwr, cohesion_multipliers, fit_sot_to_goals)
+
+wages = load_wages("worldcup_mc/data/wages.csv")     # player -> weekly £
+floor = impute_floor(wages, pct=10)                   # unknown players -> bottom 10%
+# build match records (date, team, shots_on_target, wage_bill) using team_wage_bill(...)
+stwr  = rolling_stwr(records, asof="2026-06-11", half_life_days=120)
+mults = cohesion_multipliers(stwr, sensitivity=0.0)   # 0.0 = OFF
+model.apply_cohesion(mults)                            # scales attacking lambda
+```
+
+Design points: missing wages are imputed at the bottom 10th percentile of
+known wages (per the spec); STWR is decay-weighted so recent games dominate;
+and the multiplier is shrunk by effective sample size `eff_n/(eff_n+k)`, so a
+couple of friendlies barely move it. `sensitivity` defaults to 0 — the signal
+is wired in but contributes nothing until a backtest justifies turning it up.
+
+**Wealth-normalised, not a wealth tax.** A raw SoT/wage ratio would penalise
+expensive squads automatically (more wages = lower ratio), which would just
+fade the favourites rather than predict matches. Instead `cohesion_multipliers`
+fits `log(SoT) = a + b*log(wage)` across teams and uses each team’s *residual*
+from that curve — did it create more or fewer shots than its talent predicts?
+Two teams that both meet their wage-implied baseline get a neutral multiplier
+regardless of wealth, so a poor, well-drilled side isn’t punished for being
+cheap and the signal carries information orthogonal to strength.
+
+**Defensive version.** `defensive_stwr` runs the identical machinery on
+shots on target *conceded* per wage (records need a
+`shots_on_target_against` column). A side conceding fewer shots than its wage
+bill predicts gets a residual < 0 and a multiplier < 1; feed it via
+`model.apply_cohesion(defence_mults=...)` and it scales the goal rate the
+team concedes (i.e. it’s applied to opponents), so a well-drilled defence
+correctly suppresses opponent scoring while a leaky one inflates it. Same
+wealth-neutrality and shrinkage; same off-by-default `sensitivity`.
+
+How strong is the signal? `fit_sot_to_goals(matches)` measures the
+shots-on-target → goals relationship on your data. Public data puts it near
+0.30 goals per shot on target (~31% conversion), but the R² is modest
+(~0.3 in testing): SoT tracks goals loosely, not tightly, so expect this to
+be a minor adjustment at most. It is also not opponent-adjusted — fewer SoT
+against better defences — which is a further reason to keep `sensitivity`
+low and lean on the backtest.
+
 ## Caveats worth knowing
 
 - **De-vig needs the full market.** `compare_market()` normalises the
