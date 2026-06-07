@@ -1,4 +1,0 @@
-team,is_host,suggested_home_adv,notes
-USA,TRUE,0.25,"Co-host. Apply home_adv on matches played in the USA (most US group games)."
-Canada,TRUE,0.20,"Co-host. Fewer home venues than USA; smaller crowd edge assumed."
-Mexico,TRUE,0.25,"Co-host. Plus an altitude edge for matches at Mexico City (Estadio Azteca) -- consider an extra bump."
