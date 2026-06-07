@@ -16,6 +16,7 @@ Quick start
 from .model import (
     MatchModel,
     Team,
+    Surface,
     load_teams,
     attack_defence_from_rating,
     knockout_winner,
@@ -30,6 +31,11 @@ from .tournament import (
 )
 from .odds import compare_market, devig_proportional, devig_shin, overround
 from .fit import load_results, compute_weights, fit_dixon_coles, FitResult
+from .surface import surface_from_risk, load_venue_surfaces, calibrate_surface
+from .cohesion import (
+    load_wages, impute_floor, team_wage_bill, fit_sot_to_goals,
+    rolling_stwr, defensive_stwr, cohesion_multipliers,
+)
 
 
 def groups_from_teams(teams: dict) -> dict[str, list[str]]:
@@ -50,4 +56,7 @@ __all__ = [
     "DEFAULT_R32_BRACKET", "compare_market", "devig_proportional",
     "devig_shin", "overround",
     "load_results", "compute_weights", "fit_dixon_coles", "FitResult",
+    "Surface", "surface_from_risk", "load_venue_surfaces", "calibrate_surface",
+    "load_wages", "impute_floor", "team_wage_bill", "fit_sot_to_goals",
+    "rolling_stwr", "defensive_stwr", "cohesion_multipliers",
 ]

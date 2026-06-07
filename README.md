@@ -13,15 +13,15 @@ bookmaker prices to surface value bets.
    `λ_away = exp(base + attack_away − defence_home)`. The Dixon–Coles `rho`
    term corrects the dependence in 0-0/1-0/0-1/1-1 results that an
    independent Poisson gets wrong.
-1. **Tournament engine** (`worldcup_mc/tournament.py`) — the real 2026
+2. **Tournament engine** (`worldcup_mc/tournament.py`) — the real 2026
    structure: 12 groups of 4 (round-robin), top two of each group plus the
    eight best third-placed teams into a Round of 32, then R16 → QF → SF →
    final. Group tiebreakers: points, goal difference, goals for,
    head-to-head, then random draw. Knockout ties resolve via extra time
    (rates scaled to 1/3) and a mildly strength-weighted shootout.
-1. **Monte Carlo** — runs N tournaments and returns each team’s probability
+3. **Monte Carlo** — runs N tournaments and returns each team's probability
    of reaching every stage plus the outright title probability.
-1. **Odds comparison** (`worldcup_mc/odds.py`) — strips the bookmaker margin
+4. **Odds comparison** (`worldcup_mc/odds.py`) — strips the bookmaker margin
    (proportional or Shin method) to get fair book probabilities, then
    reports `edge = model − book` and `EV per unit staked` at the quoted
    odds. Positive EV = value under the model.
@@ -69,7 +69,6 @@ model = fit.to_match_model()      # base/home_adv/rho all estimated
 ```
 
 Key knobs (all to be tuned against a backtest, not guessed):
-
 - **`half_life_days`** — exponential time decay. ~2 years by default; smooth
   decay rather than a hard cutoff, so old friendlies still bridge the
   confederations a qualification-only dataset would sever.
@@ -83,7 +82,7 @@ Key knobs (all to be tuned against a backtest, not guessed):
 what each layer feeds. Verified available as of June 2026:
 
 - **Match results** — `martj42/international_results` (GitHub raw CSV, ~49k
-  men’s internationals). The one required input. `fetch_data.py` pulls it.
+  men's internationals). The one required input. `fetch_data.py` pulls it.
 - **Club Elo** — `api.clubelo.com` (free CSV API) for league-strength
   calibration in the later player-based prior.
 - **2026 hosts** — `host_advantage_2026.csv` (USA, Canada, Mexico) for
@@ -94,13 +93,12 @@ values, FBref/Understat xG, Football-Data.co.uk historical odds) are listed
 with access caveats — note Transfermarkt scraping is against its ToS.
 
 ## Plugging in real data (what to replace)
-
 - **Ratings.** `teams_sample.csv` is synthetic (attack == defence for every
   team). Fit real ones with `fit.py` as above, or convert a single power
   rating with `attack_defence_from_rating()`.
 - **The R32 bracket.** `DEFAULT_R32_BRACKET` is structurally valid but not
   the official pairing, and `assign_third_slots()` routes the eight best
-  thirds by rank rather than FIFA’s fixed combination table. Replace both
+  thirds by rank rather than FIFA's fixed combination table. Replace both
   for a true-to-draw bracket — these only affect *who plays whom* in the
   knockouts, not the match model.
 
@@ -109,7 +107,7 @@ with access caveats — note Transfermarkt scraping is against its ToS.
 `worldcup_mc/data/venues_2026.csv` carries a preliminary per-venue
 `surface_risk_1to5`, and the model can apply a per-match `Surface` that
 models a poor pitch as a *variance compressor*: `pace` (<1) lowers total
-goals and `compression` (0..1) pulls the two teams’ expectations together,
+goals and `compression` (0..1) pulls the two teams' expectations together,
 raising the draw/upset probability.
 
 **It is OFF by default.** `load_venue_surfaces(..., effect_strength=0.0)`
@@ -124,7 +122,7 @@ m.outcome_probs("Spain", "Morocco", surface=Surface(pace=0.85, compression=0.2))
 surf, info = calibrate_surface(matches_df, baseline_model)  # shrinks to identity
 ```
 
-`calibrate_surface` shrinks toward “no effect” by `n/(n+pseudocount)`, so a
+`calibrate_surface` shrinks toward "no effect" by `n/(n+pseudocount)`, so a
 handful of friendlies barely move the model — by design, the estimate
 tightens as real matches accumulate. Wiring surfaces into the full
 tournament needs the match → venue schedule (next step); the magnitudes in
@@ -132,10 +130,10 @@ tournament needs the match → venue schedule (next step); the magnitudes in
 
 ## Cohesion signal: shots on target per wage (weak prior, off by default)
 
-`worldcup_mc/cohesion.py` builds a team “are they gelling?” signal: shots on
+`worldcup_mc/cohesion.py` builds a team "are they gelling?" signal: shots on
 target per £m of on-field wages. The thesis: a big wage bill generating few
 shots on target may be individuals, not a team — an early, exploitable
-disparity that we expect to correct as they gel. So it’s treated as a weak
+disparity that we expect to correct as they gel. So it's treated as a weak
 prior, not a verdict.
 
 ```python
@@ -159,10 +157,10 @@ is wired in but contributes nothing until a backtest justifies turning it up.
 **Wealth-normalised, not a wealth tax.** A raw SoT/wage ratio would penalise
 expensive squads automatically (more wages = lower ratio), which would just
 fade the favourites rather than predict matches. Instead `cohesion_multipliers`
-fits `log(SoT) = a + b*log(wage)` across teams and uses each team’s *residual*
+fits `log(SoT) = a + b*log(wage)` across teams and uses each team's *residual*
 from that curve — did it create more or fewer shots than its talent predicts?
 Two teams that both meet their wage-implied baseline get a neutral multiplier
-regardless of wealth, so a poor, well-drilled side isn’t punished for being
+regardless of wealth, so a poor, well-drilled side isn't punished for being
 cheap and the signal carries information orthogonal to strength.
 
 **Defensive version.** `defensive_stwr` runs the identical machinery on
@@ -170,7 +168,7 @@ shots on target *conceded* per wage (records need a
 `shots_on_target_against` column). A side conceding fewer shots than its wage
 bill predicts gets a residual < 0 and a multiplier < 1; feed it via
 `model.apply_cohesion(defence_mults=...)` and it scales the goal rate the
-team concedes (i.e. it’s applied to opponents), so a well-drilled defence
+team concedes (i.e. it's applied to opponents), so a well-drilled defence
 correctly suppresses opponent scoring while a leaky one inflates it. Same
 wealth-neutrality and shrinkage; same off-by-default `sensitivity`.
 
@@ -188,9 +186,9 @@ low and lean on the backtest.
   selections you give it. If you pass only the favourites, the implied
   overround is understated and the `edge`/`book_fair` columns are wrong.
   Pass *all* outright selections. (`EV_per_unit` uses the raw quoted odds,
-  so it’s correct regardless.)
+  so it's correct regardless.)
 - **Independence across matches.** Each match is simulated independently;
-  there’s no in-tournament form/fatigue/injury dynamics.
+  there's no in-tournament form/fatigue/injury dynamics.
 - **Shootouts** are near coin-flips with a tiny strength lean — deliberately
   conservative.
 - This is a modelling tool, not betting advice.

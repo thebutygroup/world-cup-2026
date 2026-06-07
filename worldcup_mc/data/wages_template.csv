@@ -1,0 +1,5 @@
+player_name,nationality,club,weekly_wage_gbp,source,season
+Erling Haaland,Norway,Manchester City,525000,capology,2025-26
+Kylian Mbappe,France,Real Madrid,610000,capology,2025-26
+Jude Bellingham,England,Real Madrid,310000,capology,2025-26
+EXAMPLE_unknown_player,Panama,Lower-league club,,imputed,2025-26
