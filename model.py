@@ -41,6 +41,8 @@ class Team:
     attack: float
     defence: float
     group: str | None = None
+    cohesion_mult: float = 1.0  # attacking multiplier from the SoT/wage signal; 1.0 = off
+    def_cohesion_mult: float = 1.0  # defensive multiplier (scales OPPONENT's goal rate); 1.0 = off
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,17 @@ class Surface:
     @property
     def is_identity(self) -> bool:
         return self.pace == 1.0 and self.compression == 0.0
+
+    def compose(self, other: "Surface | None") -> "Surface":
+        """Stack two effects (e.g. venue pitch + rivalry). Exact in log
+        space: paces multiply, compressions combine as 1-(1-c1)(1-c2)."""
+        if other is None:
+            return self
+        return Surface(
+            pace=self.pace * other.pace,
+            compression=1.0 - (1.0 - self.compression) * (1.0 - other.compression),
+            name="+".join(x for x in (self.name, other.name) if x) or None,
+        )
 
 
 def load_teams(path: str) -> dict[str, Team]:
@@ -130,8 +143,10 @@ class MatchModel:
                 surface: "Surface | None" = None) -> tuple[float, float]:
         h, a = self.teams[home], self.teams[away]
         adv = 0.0 if neutral else self.home_adv
-        lam_h = math.exp(self.base + h.attack - a.defence + adv)
-        lam_a = math.exp(self.base + a.attack - h.defence)
+        # own cohesion_mult scales own attack; opponent's def_cohesion_mult
+        # scales how much you score against them (good defence -> <1).
+        lam_h = math.exp(self.base + h.attack - a.defence + adv) * h.cohesion_mult * a.def_cohesion_mult
+        lam_a = math.exp(self.base + a.attack - h.defence) * a.cohesion_mult * h.def_cohesion_mult
         if surface is not None and not surface.is_identity:
             Lh, La = math.log(lam_h), math.log(lam_a)
             m = 0.5 * (Lh + La)
@@ -140,6 +155,19 @@ class MatchModel:
             lam_h = math.exp(m + (1.0 - c) * (Lh - m) + lp)
             lam_a = math.exp(m + (1.0 - c) * (La - m) + lp)
         return lam_h, lam_a
+
+    def apply_cohesion(self, mults: dict[str, float] | None = None,
+                       defence_mults: dict[str, float] | None = None) -> None:
+        """Set per-team cohesion multipliers and clear the score cache.
+        `mults` scale a team's own attack; `defence_mults` scale the goal
+        rate the team CONCEDES (i.e. applied to opponents). 1.0 = no change."""
+        for name, m in (mults or {}).items():
+            if name in self.teams:
+                self.teams[name].cohesion_mult = float(m)
+        for name, m in (defence_mults or {}).items():
+            if name in self.teams:
+                self.teams[name].def_cohesion_mult = float(m)
+        self._cache.clear()
 
     # ---- scoreline distribution ----------------------------------------
     def _score_matrix(self, lam_h: float, lam_a: float) -> np.ndarray:
