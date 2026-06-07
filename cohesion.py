@@ -101,16 +101,19 @@ def rolling_stwr(
     asof: str | pd.Timestamp,
     half_life_days: float = 120.0,
     wage_scale: float = 1e6,
+    sot_col: str = "shots_on_target",
 ) -> dict[str, dict]:
     """
     Per-team decay-weighted components for the cohesion signal.
 
-    `records` columns: date, team, shots_on_target, wage_bill (sum of on-field
-    weekly wages). Returns team -> {sot, wage, stwr, eff_n}:
-      sot   - decay-weighted mean shots on target per match
+    `records` columns: date, team, wage_bill, and the shots column named by
+    `sot_col` (default 'shots_on_target' = chances created; pass
+    'shots_on_target_against' for the defensive version). Returns
+    team -> {sot, wage, stwr, eff_n}:
+      sot   - decay-weighted mean of `sot_col` per match
       wage  - decay-weighted mean on-field wage bill (in `wage_scale` units)
-      stwr  - sot / wage (reported for reference; NOT used directly for the
-              multiplier, which uses the wealth-normalised residual below)
+      stwr  - sot / wage (reference only; the multiplier uses the
+              wealth-normalised residual, not this ratio)
       eff_n - effective (decayed) match count, used for shrinkage
     """
     asof = pd.Timestamp(asof)
@@ -119,11 +122,20 @@ def rolling_stwr(
         age = (asof - pd.to_datetime(g["date"])).dt.days.to_numpy(float)
         w = np.exp(-LN2 * np.clip(age, 0, None) / half_life_days)
         wsum = float(w.sum())
-        sot = float(np.sum(w * g["shots_on_target"].to_numpy(float)) / wsum)
+        sot = float(np.sum(w * g[sot_col].to_numpy(float)) / wsum)
         wage = float(np.sum(w * g["wage_bill"].to_numpy(float)) / wsum) / wage_scale
         out[team] = {"sot": sot, "wage": wage,
                      "stwr": (sot / wage if wage > 0 else np.nan), "eff_n": wsum}
     return out
+
+
+def defensive_stwr(records: pd.DataFrame, asof, **kw) -> dict[str, dict]:
+    """Defensive counterpart: shots on target CONCEDED per wage. Expects a
+    `shots_on_target_against` column. Feed the result to cohesion_multipliers
+    and apply via MatchModel.apply_cohesion(defence_mults=...). Because a
+    strong defence concedes FEW shots, it gets a residual < 0 and a multiplier
+    < 1, which (applied to the opponent) correctly suppresses their goal rate."""
+    return rolling_stwr(records, asof, sot_col="shots_on_target_against", **kw)
 
 
 def cohesion_multipliers(
@@ -174,39 +186,3 @@ def cohesion_multipliers(
         adj = float(np.clip(sensitivity * shrink * r, -clip, clip))
         mults[t] = math.exp(adj)
     return mults
-
-
-# --------------------------------------------------------------------------
-# structural cohesion prior: squad club-concentration
-# --------------------------------------------------------------------------
-def squad_cohesion(squad: pd.DataFrame, team_col: str = "team",
-                   club_col: str = "club") -> dict[str, dict]:
-    """
-    A wealth-neutral, pre-tournament cohesion proxy: how concentrated a squad
-    is across clubs. Players who club together already understand each other,
-    so a squad drawn from a few clubs has built-in cohesion regardless of how
-    rich or poor the federation is -- which is exactly the normalisation the
-    SoT/wage residual can't give you before any matches are played.
-
-    `squad` columns: team, club (one row per called-up player). Returns
-    team -> {n_players, n_clubs, hhi, shared_pair_frac}:
-      hhi              - Herfindahl index of club shares (1 = all one club)
-      shared_pair_frac - fraction of player pairs who share a club (0..1)
-    Use either as a feature or, with care, as a small structural prior.
-    """
-    out: dict[str, dict] = {}
-    for team, g in squad.groupby(team_col):
-        counts = g[club_col].value_counts().to_numpy(float)
-        n = counts.sum()
-        if n < 2:
-            out[team] = {"n_players": int(n), "n_clubs": int(len(counts)),
-                         "hhi": np.nan, "shared_pair_frac": np.nan}
-            continue
-        shares = counts / n
-        hhi = float(np.sum(shares ** 2))
-        shared_pairs = float(np.sum(counts * (counts - 1) / 2))
-        total_pairs = n * (n - 1) / 2
-        out[team] = {"n_players": int(n), "n_clubs": int(len(counts)),
-                     "hhi": round(hhi, 4),
-                     "shared_pair_frac": round(shared_pairs / total_pairs, 4)}
-    return out
