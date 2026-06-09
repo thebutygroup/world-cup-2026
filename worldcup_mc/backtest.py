@@ -189,6 +189,15 @@ def backtest(
                 "p_home": p[0], "p_draw": p[1], "p_away": p[2],
                 "result": ["H", "D", "A"][y_idx],
                 "brier": brier, "log_loss": ll,
+                # --- for bootstrap + calibration post-processing ---
+                # per-match baseline Brier/log-loss against the same base-rate
+                # vector, so a paired skill bootstrap recomputes the baseline on
+                # each resample instead of freezing it:
+                "base_brier": float(np.sum((bc - y) ** 2)),
+                "base_log_loss": float(-math.log(max(bc[y_idx], 1e-12))),
+                # how much training data the worse-documented side had, for the
+                # data-richness calibration split:
+                "min_team_matches": int(min(counts.get(h, 0), counts.get(a, 0))),
             })
 
     if not rows:
