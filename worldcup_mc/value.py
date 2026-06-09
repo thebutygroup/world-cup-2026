@@ -29,6 +29,7 @@ are only meaningful with the full market.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -206,3 +207,79 @@ def price_fixture(
             {"over": book_row["odds_over25"], "under": book_row["odds_under25"]},
             **kwargs)
     return rows
+
+
+# --------------------------------------------------------------------------
+# REVERSE WORKFLOW: emit the model's fair odds + the minimum price to take,
+# with NO bookmaker data. You carry this card to the book and bet whenever the
+# offered price meets or beats the threshold. Removes the odds-capture problem
+# entirely -- the only input is the fixture list.
+# --------------------------------------------------------------------------
+@dataclass
+class PriceTarget:
+    market: str          # "1X2" / "OU2.5"
+    selection: str       # home/draw/away/over/under
+    p_model: float       # model probability (mean over bootstrap)
+    p_lo: float          # CI bounds on the probability
+    p_hi: float
+    fair_odds: float     # 1/p_model -- the model's no-margin "predicted odds"
+    min_odds_small: float  # take at >= this price for the small stake
+    min_odds_big: float    # take at >= this price for the big stake
+    stake_small: float
+    stake_big: float
+
+
+_MARKET_OF = {"home": "1X2", "draw": "1X2", "away": "1X2",
+              "over": "OU2.5", "under": "OU2.5"}
+
+
+def price_targets(
+    samples: dict[str, np.ndarray],
+    ci: float = 0.90,
+    ev_small: float = 0.02,
+    ev_big: float = 0.05,
+    stake_tiers=(10.0, 50.0),
+    max_listed_odds: float = 26.0,
+) -> list[PriceTarget]:
+    """
+    Turn a fixture's bootstrap probability samples into price thresholds.
+
+    min_odds_small = (1 + ev_small) / p_model   -> EV >= ev_small at the point
+                                                    estimate; small stake.
+    min_odds_big   = (1 + ev_big)  / p_lo        -> EV >= ev_big even at the
+                                                    pessimistic end of the CI;
+                                                    big stake. Wide CI pushes
+                                                    this out of reach, which is
+                                                    the intended gate.
+
+    Thresholds are rounded UP (you must clear them, never round a marginal bet
+    in). Selections whose fair odds exceed `max_listed_odds` are dropped to keep
+    the card usable -- those are longshots where books are typically already
+    over-priced (favourite-longshot bias), not value.
+    """
+    lo_q, hi_q = (1 - ci) / 2, 1 - (1 - ci) / 2
+    out: list[PriceTarget] = []
+    for sel, ps in samples.items():
+        if ps.size == 0:
+            continue
+        p = float(ps.mean())
+        if p <= 1e-9:
+            continue
+        p_lo, p_hi = (float(x) for x in np.quantile(ps, [lo_q, hi_q]))
+        fair = 1.0 / p
+        if fair > max_listed_odds:
+            continue
+        min_small = math.ceil((1.0 + ev_small) / p * 100) / 100
+        min_big = math.ceil((1.0 + ev_big) / max(p_lo, 1e-9) * 100) / 100
+        out.append(PriceTarget(
+            market=_MARKET_OF[sel], selection=sel,
+            p_model=p, p_lo=p_lo, p_hi=p_hi, fair_odds=round(fair, 2),
+            min_odds_small=min_small, min_odds_big=min_big,
+            stake_small=stake_tiers[0], stake_big=stake_tiers[1]))
+    return out
+
+
+def fixture_targets(models, home, away, neutral, **kwargs) -> list[PriceTarget]:
+    """Convenience: bootstrap samples for a fixture -> price targets."""
+    samples = _selection_samples(models, home, away, neutral)
+    return price_targets(samples, **kwargs)
