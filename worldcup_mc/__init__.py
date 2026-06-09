@@ -36,6 +36,16 @@ from .cohesion import (
     load_wages, impute_floor, team_wage_bill, fit_sot_to_goals,
     rolling_stwr, defensive_stwr, cohesion_multipliers,
 )
+from .markets import (
+    score_matrix, match_1x2, totals, btts, correct_score,
+    expected_goals, predict_fixture,
+)
+from .backtest import (
+    filter_matches, backtest, half_life_sweep, BacktestResult,
+)
+from .live import (
+    append_live_result, build_results_with_live, refit, predict_next,
+)
 
 
 def groups_from_teams(teams: dict) -> dict[str, list[str]]:
@@ -59,4 +69,8 @@ __all__ = [
     "Surface", "surface_from_risk", "load_venue_surfaces", "calibrate_surface",
     "load_wages", "impute_floor", "team_wage_bill", "fit_sot_to_goals",
     "rolling_stwr", "defensive_stwr", "cohesion_multipliers",
+    "score_matrix", "match_1x2", "totals", "btts", "correct_score",
+    "expected_goals", "predict_fixture",
+    "filter_matches", "backtest", "half_life_sweep", "BacktestResult",
+    "append_live_result", "build_results_with_live", "refit", "predict_next",
 ]
