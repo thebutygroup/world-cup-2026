@@ -1,30 +1,57 @@
 # World Cup 2026 — Monte Carlo Simulator
 
-A small, modular Python package that simulates the 48-team 2026 World Cup
-many thousands of times and compares the resulting probabilities to UK
-bookmaker prices to surface value bets.
+**In one sentence:** this code plays out the 2026 World Cup tens of thousands
+of times on a computer, works out how often each team wins, and then checks
+those numbers against bookmaker prices to spot bets where the odds look too
+generous.
+
+The idea behind it is simple. We can't know what will happen in a single
+tournament — one tournament is decided by a handful of near-coin-flips. But
+if we simulate it thousands of times, the share of simulations a team wins is
+a good estimate of its true chance. If our estimate of a team's chance is
+higher than the chance implied by the bookmaker's price, that's a potential
+**value bet**: a price that pays out more than the risk justifies, *on
+average, over many bets*.
+
+The rest of this README walks through the pieces. Each section starts plainly,
+then goes deeper for readers who want the technical detail.
 
 ## What it does
 
-1. **Match model** (`worldcup_mc/model.py`) — scorelines from a
-   Dixon–Coles bivariate Poisson. Each team has an `attack` and `defence`
-   rating; expected goals are
+**Plainly:** four moving parts — a model of a single match, an engine that
+plays a whole tournament, a loop that runs that tournament thousands of times,
+and a comparison against bookmaker odds.
+
+**In detail:**
+
+1. **Match model** (`worldcup_mc/model.py`) — predicts the scoreline of one
+   game. Each team carries an `attack` and a `defence` number; a strong attack
+   and a weak opposing defence mean more expected goals. The maths is a
+   *Dixon–Coles bivariate Poisson*: goals are modelled as a Poisson process
+   (the standard model for "how many of a rare-ish event happen"), with a
+   small correction (`rho`) for the fact that low-scoring results like 0-0,
+   1-0, 0-1 and 1-1 happen at slightly different rates than independent
+   randomness would predict. Expected goals are
    `λ_home = exp(base + attack_home − defence_away + home_adv)` and
-   `λ_away = exp(base + attack_away − defence_home)`. The Dixon–Coles `rho`
-   term corrects the dependence in 0-0/1-0/0-1/1-1 results that an
-   independent Poisson gets wrong.
+   `λ_away = exp(base + attack_away − defence_home)`.
 2. **Tournament engine** (`worldcup_mc/tournament.py`) — the real 2026
    structure: 12 groups of 4 (round-robin), top two of each group plus the
    eight best third-placed teams into a Round of 32, then R16 → QF → SF →
    final. Group tiebreakers: points, goal difference, goals for,
    head-to-head, then random draw. Knockout ties resolve via extra time
-   (rates scaled to 1/3) and a mildly strength-weighted shootout.
-3. **Monte Carlo** — runs N tournaments and returns each team's probability
-   of reaching every stage plus the outright title probability.
-4. **Odds comparison** (`worldcup_mc/odds.py`) — strips the bookmaker margin
-   (proportional or Shin method) to get fair book probabilities, then
-   reports `edge = model − book` and `EV per unit staked` at the quoted
-   odds. Positive EV = value under the model.
+   (scoring rates scaled to 1/3 for the shorter period) and a mildly
+   strength-weighted penalty shootout.
+3. **Monte Carlo** — "Monte Carlo" just means *estimate something by running
+   many random trials and averaging*. Here it runs N whole tournaments and
+   reports each team's probability of reaching every stage, plus the outright
+   title probability.
+4. **Odds comparison** (`worldcup_mc/odds.py`) — bookmaker prices include a
+   built-in margin (the "overround" or "vig") that makes the implied
+   probabilities add up to more than 100%. We strip that margin off
+   (proportional or Shin method) to recover the bookmaker's *fair* implied
+   probability, then report `edge = model − book` and `EV per unit staked`
+   (expected profit per £1 bet) at the quoted odds. Positive EV = value under
+   the model.
 
 ## Quick start
 
@@ -51,9 +78,17 @@ print(wc.compare_market(odds, probs["P(win)"].to_dict(), method="shin"))
 
 ## Fitting real ratings (the part that matters most)
 
-The single biggest accuracy lever is replacing the synthetic ratings with
-ones fitted to real results. `worldcup_mc/fit.py` does this by weighted
-maximum likelihood:
+**Plainly:** the attack and defence numbers are where almost all the accuracy
+lives. We don't guess them — we *learn* them from tens of thousands of real
+historical international results, letting the data tell us how strong each team
+is. Recent games count more than old ones, friendlies count less than
+competitive games, and teams with very few matches get pulled toward the
+average so one fluky result doesn't make them look world-class.
+
+**In detail:** `worldcup_mc/fit.py` fits the ratings by *weighted maximum
+likelihood* — it finds the set of attack/defence numbers that makes the actual
+historical scorelines most probable, with each match weighted by how much we
+trust it.
 
 ```bash
 python fetch_data.py     # downloads results.csv from martj42 (networked machine)
@@ -68,13 +103,154 @@ fit = fit_dixon_coles(df, w, ridge=0.05)
 model = fit.to_match_model()      # base/home_adv/rho all estimated
 ```
 
-Key knobs (all to be tuned against a backtest, not guessed):
-- **`half_life_days`** — exponential time decay. ~2 years by default; smooth
-  decay rather than a hard cutoff, so old friendlies still bridge the
-  confederations a qualification-only dataset would sever.
-- **`friendly_weight`** — friendlies down-weighted, not discarded.
-- **`ridge`** — shrinks sparse/minnow teams toward the average (cheap
-  Bayesian-prior-toward-mean); raise it when a team has few games.
+Three knobs control the weighting. None of them should be guessed — each is
+set by the backtest described in the next section.
+
+- **`half_life_days`** (how fast old games fade) — instead of a hard cutoff
+  that throws away everything before a date, every match's weight decays
+  smoothly with age. A half-life of 730 days means a game from two years ago
+  counts half as much as a game today. *Why smooth decay?* A hard
+  "qualifiers-only" cutoff would sever the links between confederations —
+  there's no competitive match connecting a European team to a South American
+  one, so old friendlies are the only thread tying their rating scales
+  together. Decay keeps that thread while still favouring recency.
+- **`friendly_weight`** (how much friendlies count) — friendlies have
+  experimental line-ups and low stakes, so they're down-weighted (0.3 = a
+  friendly counts ~a third of a competitive match). They're *not* discarded,
+  because they're often the only cross-confederation games that exist.
+- **`ridge`** (how hard to shrink thin-data teams) — a team with only a few
+  recorded games could look absurdly strong or weak on a couple of lucky
+  scorelines. Ridge pulls every team's rating gently toward the average, with
+  the pull mattering most for teams with little data. It's the cheapest form
+  of a Bayesian "prior toward the mean": start from "average until proven
+  otherwise." Raise it when teams are data-poor.
+
+## Validating and tuning the model (the part that keeps us honest)
+
+This is the heart of the project's rigor. A model that looks good on the data
+it was built from tells you nothing — the real question is how well it predicts
+games it has *never seen*. Everything below exists to answer that question
+honestly and to set the three knobs above without fooling ourselves.
+
+Run the whole thing with:
+
+```bash
+python fetch_data.py          # once, on a networked machine
+python tune_holdout_bet.py    # tune -> holdout -> bet, end to end
+```
+
+### Walk-forward testing: only ever predict the future
+
+**Plainly:** to test the model fairly, we pretend we're back in time. For each
+historical match we want to score, we rebuild the model using *only* the games
+that had happened before that match's kickoff, then ask it to predict that
+match. The model never gets to peek at the result it's being tested on, or at
+anything that happened afterward. We do this for hundreds of past matches and
+see how good the predictions were.
+
+**Why it matters:** the cardinal sin in this kind of work is *leakage* —
+accidentally letting information from the future sneak into a prediction.
+A model that has secretly seen the answer will look brilliant in testing and
+then lose money in the real world. Walk-forward testing structurally prevents
+that: information only ever flows forward in time.
+
+**In detail** (`worldcup_mc/backtest.py`): we pick a test set (say every match
+of the 2022 World Cup), group those matches by date, and for each date refit
+the entire Dixon–Coles model on all results strictly *before* that date, then
+score that day's matches. Every prediction uses only the past.
+
+We score each match's home/draw/away forecast two ways, because *accuracy
+alone is the wrong target* — we care about whether the probabilities are
+trustworthy, not just whether the favourite was tipped:
+
+- **Brier score** — the squared distance between the forecast and what actually
+  happened. Forecast a team at 70% and they win, you're penalised for the
+  missing 30%; forecast them at 99% and they lose, you're punished hard. Lower
+  is better. It rewards being both *right* and *appropriately confident*.
+- **Log loss** — similar, but punishes confident wrong calls far more
+  severely. Saying something was nearly impossible and then watching it happen
+  is very costly here.
+
+We always report a **baseline** alongside — the score you'd get by predicting
+nothing but the historical base rates (roughly how often home/draw/away occur
+in general). If the model can't beat that, it has learned nothing useful. The
+"skill" percentage is how much better than the baseline we are.
+
+Matches where either team has almost no history are *skipped and counted*, not
+silently dropped — their rating would be pure guesswork, and hiding the skips
+would flatter the model.
+
+### Tuning without fooling ourselves: the bootstrap gate
+
+**Plainly:** we want to pick the best settings for the three knobs. The naive
+approach — try several settings, keep whichever scores best — is a trap,
+because on a few hundred matches the "best" score is mostly luck. Tiny
+differences between settings are noise. So before we declare one setting better
+than another, we make it *prove* the difference is real and not a fluke.
+
+**Why it matters:** if you tune to noise, you'll pick settings that happened to
+work on your test matches and will fail on new ones. This is overfitting, and
+it's how confident-looking models quietly go broke.
+
+**In detail:** the proof is a *paired bootstrap*. We take the per-match scores,
+resample them thousands of times with replacement, and build a confidence
+interval for the difference between two settings. A candidate only counts as
+genuinely better than the baseline if that entire interval sits on the better
+side of zero. If the interval straddles zero, the two settings are
+indistinguishable and we keep the simpler baseline. `choose_config` enforces
+this, and when nothing clears the bar it says so explicitly — *a flat result
+is an answer, not a failure.* It means "stop tuning, you're chasing noise."
+
+### Three improvements that make the tuning trustworthy
+
+1. **Joint grid, not one knob at a time.** The three knobs interact — a longer
+   half-life means more effective data per team, which means *less* shrinkage
+   is needed. Tuning them one at a time can land on the wrong combination, so
+   `gated_joint_sweep` sweeps them together over a grid.
+
+2. **Multiple tournaments (folds), not one.** A setting that wins on the 2022
+   World Cup alone might just suit that one event. We run the sweep across
+   several independent test sets — the 2018 and 2022 World Cups, Euro 2020,
+   and a multi-year block of qualifiers — and require a winning setting to hold
+   up across most of them. Winning everywhere is evidence; winning once is
+   luck. The `folds_won` column tracks this stability directly.
+
+3. **Warm-starting, so all of the above is affordable.** Refitting the full
+   model from scratch for every test date is slow, and a joint grid across many
+   folds multiplies that cost enormously. But consecutive test dates differ by
+   only a handful of matches, so the previous day's fitted ratings are an
+   excellent starting point for the next. Feeding them in as the starting guess
+   (`warm_start`) reaches the identical answer in a fraction of the iterations —
+   verified to give a *bit-for-bit identical* solution at meaningfully higher
+   speed. This is purely a speed optimization with no effect on results; it's
+   what turns an overnight job into a coffee-break one and makes the honest,
+   expensive validation above practical to actually run. Long qualifier windows
+   can additionally refit every N days (`refit_interval_days`) instead of every
+   single matchday — still strictly past-only, just slightly staler ratings.
+
+### The three-stage pipeline
+
+`tune_holdout_bet.py` ties it together with one hard rule: **the data you tune
+on and the data you judge yourself on must never be the same data.**
+
+- **Stage 1 — Tune** on pre-2024 tournaments only. The gated joint sweep across
+  folds picks the settings (or keeps the baseline if nothing clears the gate).
+- **Stage 2 — Holdout.** The chosen settings are frozen and evaluated *exactly
+  once* on 2024-onward matches the tuning never touched (Euro 2024, Copa
+  América 2024, 2024–25 qualifiers and Nations League). These are the only
+  numbers you should actually trust, because no decision was made by looking at
+  them. **Re-running Stage 1 and then re-checking Stage 2 burns the holdout** —
+  once you've peeked, it's no longer unseen data, and you'd need a fresh window.
+  Alongside Brier and log loss, this stage reports **calibration**: when the
+  model says 30%, does it happen about 30% of the time? (See
+  `worldcup_mc/calibration.py` for the reliability table, expected calibration
+  error, and the Murphy reliability/resolution/uncertainty decomposition.)
+  Calibration is the binding constraint on thin-edge betting — if our 30%
+  forecasts only land 22% of the time, every "value" bet priced off them loses.
+- **Stage 3 — Bet.** With settings locked, refit on *all* history as of today,
+  write the ratings, and produce the normal value output: per-match 1X2 and
+  over/under edges against book prices where you have them, and "minimum price
+  to take" fair-odds targets for fixtures where you don't.
 
 ## Data sources
 
@@ -104,6 +280,11 @@ with access caveats — note Transfermarkt scraping is against its ToS.
 
 ## Pitch surface dimension
 
+**Plainly:** a bad pitch makes football scrappier — fewer goals, more even
+contests, more upsets. This optional feature lets a poor playing surface nudge
+the model toward lower-scoring, closer games. It's **off by default** and only
+worth turning on once there's real data to size the effect.
+
 `worldcup_mc/data/venues_2026.csv` carries a preliminary per-venue
 `surface_risk_1to5`, and the model can apply a per-match `Surface` that
 models a poor pitch as a *variance compressor*: `pace` (<1) lowers total
@@ -129,6 +310,12 @@ tournament needs the match → venue schedule (next step); the magnitudes in
 `surface_from_risk` are placeholders until calibrated.
 
 ## Cohesion signal: shots on target per wage (weak prior, off by default)
+
+**Plainly:** an expensive squad that isn't creating many chances may be a bag
+of star individuals who haven't gelled into a team yet — a gap that often
+closes as the tournament goes on. This optional signal tries to spot that by
+comparing a team's shot output to what its wage bill implies it *should*
+produce. It's a gentle nudge, not a verdict, and **off by default**.
 
 `worldcup_mc/cohesion.py` builds a team "are they gelling?" signal: shots on
 target per £m of on-field wages. The thesis: a big wage bill generating few
@@ -201,13 +388,22 @@ worldcup_mc/
   model.py           Dixon-Coles match model + sampling
   tournament.py      group/knockout structure + Monte Carlo loop
   odds.py            de-vig + value comparison
-  fit.py             time-decay Dixon-Coles MLE ratings fitter
+  markets.py         per-match 1X2 / totals / BTTS / correct-score
+  fit.py             time-decay Dixon-Coles MLE ratings fitter (+ warm start)
+  backtest.py        walk-forward backtest + gated multi-fold tuning
+  calibration.py     bootstrap CIs, reliability/ECE, Murphy decomposition
+  value.py           bootstrap-ensemble value card with CI-gated stakes
   data/
     teams_sample.csv         synthetic placeholder ratings/draw
     SOURCES.csv              data-source manifest (URLs, licences)
     host_advantage_2026.csv  host nations + suggested home edge
+    fixtures_slate.csv       upcoming fixtures (no odds needed)
+    odds_slate.csv           upcoming fixtures with book prices
 fetch_data.py        downloads real results.csv (run on networked machine)
 fit_ratings.py       fetch -> fit -> write teams_fitted.csv
+tune_holdout_bet.py  full pipeline: tune (Stage 1) -> holdout (Stage 2) -> bet (Stage 3)
+backtest_example.py  single-tournament walk-forward backtest demo
+calibration_example.py  calibration + bootstrap demo on a group-stage-like set
 make_sample_data.py  regenerates the placeholder ratings/draw
 run_example.py       end-to-end simulation + odds demo
 ```
