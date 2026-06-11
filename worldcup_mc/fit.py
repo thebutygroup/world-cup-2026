@@ -138,10 +138,20 @@ def fit_dixon_coles(
     ridge: float = 0.05,
     max_home_adv: float = 1.0,
     verbose: bool = False,
+    warm_start: "FitResult | None" = None,
+    maxiter: int = 500,
 ) -> FitResult:
     """
     Weighted-MLE fit. Returns centred attack/defence (mean 0), a base rate,
     home advantage and rho.
+
+    warm_start: a previous FitResult to initialise theta from (teams matched
+    by name; unseen teams start at 0). In a walk-forward loop, consecutive
+    training sets differ by a handful of matches, so the previous optimum is
+    an excellent starting point -- L-BFGS converges in a small fraction of
+    the cold-start iterations. The centred parameters are likelihood-
+    equivalent to the raw optimum (the centring shift cancels inside
+    base + attack - defence), so they are a valid initialisation.
     """
     teams = sorted(set(df["home_team"]) | set(df["away_team"]))
     idx = {t: i for i, t in enumerate(teams)}
@@ -179,9 +189,19 @@ def fit_dixon_coles(
     theta0[2 * n + 1] = 0.25   # home_adv start
     theta0[2 * n + 2] = -0.05  # rho start
 
+    if warm_start is not None:
+        for t, i in idx.items():
+            prev = warm_start.attack.get(t)
+            if prev is not None:
+                theta0[i] = prev
+                theta0[n + i] = warm_start.defence[t]
+        theta0[2 * n] = warm_start.base
+        theta0[2 * n + 1] = min(max(warm_start.home_adv, 0.0), max_home_adv)
+        theta0[2 * n + 2] = min(max(warm_start.rho, -0.2), 0.2)
+
     bounds = [(None, None)] * (2 * n) + [(None, None), (0.0, max_home_adv), (-0.2, 0.2)]
     res = minimize(nll, theta0, method="L-BFGS-B", bounds=bounds,
-                   options={"maxiter": 500, "disp": verbose})
+                   options={"maxiter": maxiter, "disp": verbose})
 
     atk, dfc, base, gamma, rho = unpack(res.x)
     # centre for interpretability, folding the means into base
