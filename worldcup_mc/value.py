@@ -240,6 +240,7 @@ def price_targets(
     ev_big: float = 0.05,
     stake_tiers=(10.0, 50.0),
     max_listed_odds: float = 26.0,
+    drop_longshots: bool = False,
 ) -> list[PriceTarget]:
     """
     Turn a fixture's bootstrap probability samples into price thresholds.
@@ -267,10 +268,21 @@ def price_targets(
             continue
         p_lo, p_hi = (float(x) for x in np.quantile(ps, [lo_q, hi_q]))
         fair = 1.0 / p
-        if fair > max_listed_odds:
+        # Longshots (fair odds above max_listed_odds) are kept in the card so
+        # the market is always COMPLETE -- a 1X2 fixture always shows all of
+        # home/draw/away -- but flagged as no-bet (NaN thresholds), since the
+        # favourite-longshot bias means books are usually already over-priced
+        # there, not offering value. drop_longshots=True restores the old
+        # behaviour of removing them entirely.
+        is_longshot = fair > max_listed_odds
+        if is_longshot and drop_longshots:
             continue
-        min_small = math.ceil((1.0 + ev_small) / p * 100) / 100
-        min_big = math.ceil((1.0 + ev_big) / max(p_lo, 1e-9) * 100) / 100
+        if is_longshot:
+            min_small = float("nan")
+            min_big = float("nan")
+        else:
+            min_small = math.ceil((1.0 + ev_small) / p * 100) / 100
+            min_big = math.ceil((1.0 + ev_big) / max(p_lo, 1e-9) * 100) / 100
         out.append(PriceTarget(
             market=_MARKET_OF[sel], selection=sel,
             p_model=p, p_lo=p_lo, p_hi=p_hi, fair_odds=round(fair, 2),

@@ -42,10 +42,44 @@ LN2 = math.log(2.0)
 # --------------------------------------------------------------------------
 # data loading / weighting
 # --------------------------------------------------------------------------
-def load_results(path: str, min_date: str | None = "2014-01-01") -> pd.DataFrame:
+# Teams that appear in the martj42 results set but are NOT FIFA members
+# eligible for the World Cup. They play mostly against each other or in
+# regional games (Island Games, etc.), often racking up lopsided scores
+# against very weak opposition. Left in, the fit reads those goal-fests as
+# world-class attack with a barely-tested defence -- e.g. Isle of Man and
+# Jersey rating above Brazil and Germany. Excluded by default.
+NON_FIFA_TEAMS = frozenset({
+    "Isle of Man", "Jersey", "Guernsey", "Alderney", "Greenland",
+    "Monaco", "Vatican City", "Vatican", "Kiribati", "Tuvalu",
+    "Federated States of Micronesia", "Micronesia", "Palau",
+    "Northern Cyprus", "Western Sahara", "Zanzibar", "Saare County",
+    "Yorkshire", "Kernow", "Cornwall", "Shetland", "Orkney",
+    "Frøya", "Hitra", "Falkland Islands", "Saint Helena",
+    "Niue", "Tokelau", "Wallis and Futuna", "Tahiti reserves",
+    "Kosovo U21", "Padania", "Occitania", "Provence", "Sápmi",
+    "Chagos Islands", "Saint Pierre and Miquelon", "Bonaire",
+    "Sint Maarten", "French Guiana", "Martinique", "Guadeloupe",
+    "Saint Martin", "Réunion", "Mayotte",
+    "Elba Island", "Parishes of Jersey", "Surrey", "Artsakh", "Sealand",
+})
+
+
+def load_results(
+    path: str,
+    min_date: str | None = "2014-01-01",
+    exclude_non_fifa: bool = True,
+    extra_exclude: set[str] | None = None,
+) -> pd.DataFrame:
     """Load results.csv (martj42 schema). `min_date` bounds compute size;
     decay handles recency, so keep enough history to bridge confederations
-    (a few World Cup cycles)."""
+    (a few World Cup cycles).
+
+    exclude_non_fifa: drop matches involving non-FIFA teams (Isle of Man,
+    Jersey, Island-Games sides, French overseas territories that aren't FIFA
+    members, etc.). These distort the ratings badly -- they pile up goals
+    against minnows and never face real defences -- so they're removed by
+    default. Set False to keep them; add your own names via extra_exclude.
+    """
     df = pd.read_csv(path)
     df["date"] = pd.to_datetime(df["date"])
     df = df.dropna(subset=["home_score", "away_score"]).copy()
@@ -57,6 +91,16 @@ def load_results(path: str, min_date: str | None = "2014-01-01") -> pd.DataFrame
         df["neutral"] = True
     if min_date is not None:
         df = df[df["date"] >= pd.Timestamp(min_date)]
+    if exclude_non_fifa or extra_exclude:
+        drop = set(NON_FIFA_TEAMS) if exclude_non_fifa else set()
+        if extra_exclude:
+            drop |= set(extra_exclude)
+        before = len(df)
+        df = df[~df["home_team"].isin(drop) & ~df["away_team"].isin(drop)]
+        removed = before - len(df)
+        if removed:
+            print(f"load_results: excluded {removed} matches involving "
+                  f"{len(drop)} non-FIFA/regional teams")
     return df.reset_index(drop=True)
 
 

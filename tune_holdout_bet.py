@@ -29,6 +29,15 @@ End-to-end upgraded workflow:
 
 from __future__ import annotations
 
+import os as _os
+# Cap BLAS/numpy threads BEFORE numpy is imported. Each Dixon-Coles fit is
+# small, so multi-threaded matrix math just fights itself (oversubscription):
+# low CPU utilisation, crawling speed, multiple busy-but-idle processes. One
+# thread per process is reliably FASTER here.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_v, "1")
+
 import json
 import os
 import sys
@@ -55,15 +64,34 @@ ASOF = str(date.today())          # decay measured back from today for Stage 3
 # --- baseline = the current defaults; candidates must BEAT this, gated ---
 BASELINE = {"half_life_days": 730.0, "friendly_weight": 0.3, "ridge": 0.05}
 
+# FAST_MODE: a coarse but honest sweep that finishes in ~15-20 min instead of
+# hours. It varies the two knobs that matter most (half_life, ridge) at the
+# baseline friendly_weight, on a capped qualifiers sample. Once it points you
+# at a region, set FAST_MODE=False for the full 36-config grid to refine.
+FAST_MODE = True
+
 # --- joint grid: knobs interact, so sweep them together, not one at a time
-GRID = [
-    {"half_life_days": hl, "friendly_weight": fw, "ridge": rg}
-    for hl, fw, rg in product(
-        (365.0, 730.0, 1095.0, 1460.0),
-        (0.15, 0.3, 0.5),
-        (0.02, 0.05, 0.15),
-    )
-]
+if FAST_MODE:
+    GRID = [
+        {"half_life_days": hl, "friendly_weight": 0.3, "ridge": rg}
+        for hl, rg in product(
+            (730.0, 1095.0, 1460.0),     # half-life: the dominant knob
+            (0.05, 0.15),                # ridge: light vs heavier shrinkage
+        )
+    ]
+    GATE_N_BOOT = 2000                   # plenty to gate a decision
+    QUALS_CAP = 400                      # sample the huge qualifiers fold
+else:
+    GRID = [
+        {"half_life_days": hl, "friendly_weight": fw, "ridge": rg}
+        for hl, fw, rg in product(
+            (365.0, 730.0, 1095.0, 1460.0),
+            (0.15, 0.3, 0.5),
+            (0.02, 0.05, 0.15),
+        )
+    ]
+    GATE_N_BOOT = 4000
+    QUALS_CAP = 0                        # 0 = use the whole fold
 
 # walk-forward economy: warm starts everywhere; long qualifier windows
 # refit every 14 days instead of every matchday (still strictly past-only)
@@ -83,6 +111,17 @@ EV_BIG = 0.05         # EV cushion for the uncertainty-adjusted (CI-low) thresho
 # fold construction -- tuning strictly pre-2024, holdout strictly 2024+
 # --------------------------------------------------------------------------
 def tuning_folds(history: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    quals = filter_matches(history, tournament_contains="qualification",
+                           start="2021-01-01", end="2023-12-31")
+    # The qualifiers fold can be ~1300+ matches and dominates runtime. For
+    # TUNING (choosing parameters, not final evaluation) a few hundred
+    # evenly-spaced matches carry the same signal at a fraction of the cost.
+    # Evenly spaced -> preserves the time spread, so decay still gets tested
+    # across the window rather than clustering in one period.
+    if QUALS_CAP and len(quals) > QUALS_CAP:
+        step = len(quals) / QUALS_CAP
+        keep = [int(i * step) for i in range(QUALS_CAP)]
+        quals = quals.sort_values("date").iloc[keep].reset_index(drop=True)
     return {
         "wc2018": filter_matches(history, tournament_contains="FIFA World Cup",
                                  year=2018),
@@ -90,8 +129,7 @@ def tuning_folds(history: pd.DataFrame) -> dict[str, pd.DataFrame]:
                                    year=2021),          # played summer 2021
         "wc2022": filter_matches(history, tournament_contains="FIFA World Cup",
                                  year=2022),
-        "quals_21_23": filter_matches(history, tournament_contains="qualification",
-                                      start="2021-01-01", end="2023-12-31"),
+        "quals_21_23": quals,
     }
 
 
@@ -100,7 +138,9 @@ def tuning_folds(history: pd.DataFrame) -> dict[str, pd.DataFrame]:
 # --------------------------------------------------------------------------
 def stage1_tune(history):
     print("=" * 72)
-    print("STAGE 1 -- gated joint sweep on pre-2024 folds")
+    mode = "FAST (coarse grid, capped quals)" if FAST_MODE else "FULL grid"
+    print(f"STAGE 1 -- gated joint sweep on pre-2024 folds  [{mode}]")
+    print(f"           {len(GRID)} configs, gate n_boot={GATE_N_BOOT}")
     print("=" * 72)
     folds = tuning_folds(history)
     for name, f in folds.items():
@@ -114,7 +154,7 @@ def stage1_tune(history):
     intervals = {k: 14.0 for k in folds if k.startswith("quals")}
     table, store = gated_joint_sweep(
         history, folds, GRID, BASELINE,
-        n_boot=4000, ci=0.95, verbose=True,
+        n_boot=GATE_N_BOOT, ci=0.95, verbose=True,
         refit_interval_by_fold=intervals, **BT)
 
     print("\n--- sweep table (negative diff = better than baseline) ---")
