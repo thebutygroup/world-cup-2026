@@ -43,8 +43,7 @@ from worldcup_mc.backtest import (
 from worldcup_mc.calibration import (
     bootstrap_metrics, reliability_table, expected_calibration_error,
     brier_decomposition, split_by_data_richness)
-from worldcup_mc import markets as mkt
-from worldcup_mc.odds import devig_shin, overround
+from worldcup_mc import value as val
 
 RESULTS = "worldcup_mc/data/results.csv"
 ODDS_SLATE = "worldcup_mc/data/odds_slate.csv"
@@ -72,6 +71,12 @@ BT = dict(warm_start=True)
 
 MIN_FOLDS_WON_FRAC = 0.5
 RICHNESS_THRESHOLD = 15
+
+# --- Stage 3 price-target card ---
+N_BOOT = 200          # model refits for the probability CI (raise for tighter CIs, slower)
+CI = 0.90             # confidence level for the uncertainty-adjusted price
+EV_SMALL = 0.02       # EV cushion baked into the naive fair-odds threshold
+EV_BIG = 0.05         # EV cushion for the uncertainty-adjusted (CI-low) threshold
 
 
 # --------------------------------------------------------------------------
@@ -188,8 +193,10 @@ def stage2_holdout(history, cfg):
 
 def stage3_bet(history, cfg):
     print("\n" + "=" * 72)
-    print(f"STAGE 3 -- betting output (fit as of {ASOF}, frozen config)")
+    print(f"STAGE 3 -- price-target card (fit as of {ASOF}, frozen config)")
     print("=" * 72)
+
+    # point fit -> write ratings/params (and a quick strength sanity check)
     w = compute_weights(history, asof=ASOF, **{
         "half_life_days": cfg["half_life_days"],
         "friendly_weight": cfg["friendly_weight"]})
@@ -198,81 +205,96 @@ def stage3_bet(history, cfg):
           f"base={fit.base:.3f} home_adv={fit.home_adv:.3f} rho={fit.rho:.3f}")
     fit.write_ratings_csv("worldcup_mc/data/teams_fitted.csv")
     fit.write_params("worldcup_mc/data/params_fitted.json")
-    with open("worldcup_mc/data/tuned_config.json", "w") as f:
-        json.dump({"config": cfg, "asof": ASOF}, f, indent=2)
-    model = fit.to_match_model()
 
-    # --- per-match slate vs book prices (the normal value output) ---
-    if os.path.exists(ODDS_SLATE):
-        slate = pd.read_csv(ODDS_SLATE)
-        print(f"\n--- per-match value vs {ODDS_SLATE} ---")
-        rows = []
-        for r in slate.itertuples(index=False):
-            if r.home not in model.teams or r.away not in model.teams:
-                print(f"  skip {r.home} v {r.away}: team missing from fit")
-                continue
-            card = mkt.predict_fixture(model, r.home, r.away,
-                                       neutral=bool(r.neutral))
-            p = card["1x2"]
-            odds_vec = [r.odds_home, r.odds_draw, r.odds_away]
-            fair = devig_shin(pd.Series(odds_vec).to_numpy(float))
-            ov = overround(pd.Series(odds_vec).to_numpy(float)) - 1.0
-            for sel, prob, o, fb in zip(("home", "draw", "away"),
-                                        (p["home"], p["draw"], p["away"]),
-                                        odds_vec, fair):
-                rows.append({
-                    "date": r.date, "match": f"{r.home} v {r.away}",
-                    "market": "1X2", "sel": sel, "odds": o,
-                    "p_model": prob, "p_fair_book": float(fb),
-                    "edge": prob - float(fb),
-                    "EV_per_unit": prob * (o - 1) - (1 - prob),
-                    "overround": ov,
-                })
-            t = card["totals"].get(2.5)
-            if t and pd.notna(getattr(r, "odds_over25", None)):
-                for sel, prob, o in (("over", t["over"], r.odds_over25),
-                                     ("under", t["under"], r.odds_under25)):
-                    rows.append({
-                        "date": r.date, "match": f"{r.home} v {r.away}",
-                        "market": "OU2.5", "sel": sel, "odds": o,
-                        "p_model": prob, "p_fair_book": float("nan"),
-                        "edge": float("nan"),
-                        "EV_per_unit": prob * (o - 1) - (1 - prob),
-                        "overround": float("nan"),
-                    })
-        card_df = pd.DataFrame(rows)
-        if len(card_df):
-            print(card_df.round(4).to_string(index=False))
-            value = card_df[card_df["EV_per_unit"] > 0]
-            print("\npositive-EV selections:")
-            print(value.round(4).to_string(index=False) if len(value)
-                  else "  none at these prices")
-            os.makedirs(OUT_DIR, exist_ok=True)
-            out_csv = os.path.join(
-                OUT_DIR, f"betlist_{datetime.now():%Y%m%d_%H%M%S}.csv")
-            card_df.to_csv(out_csv, index=False)
-            print(f"\nbet card written to {out_csv}")
-    else:
-        print(f"\n(no {ODDS_SLATE} -- skipping book comparison)")
+    if not os.path.exists(FIXTURES_SLATE):
+        print(f"\n(no {FIXTURES_SLATE} -- nothing to price. Put your fixtures "
+              "there: date,group,home,away,neutral)")
+        return
 
-    # --- fair-odds price targets for fixtures with no book prices yet ---
-    if os.path.exists(FIXTURES_SLATE):
-        fx = pd.read_csv(FIXTURES_SLATE)
-        print(f"\n--- fair-odds card for {FIXTURES_SLATE} "
-              f"(min price to take = fair odds * 1.02) ---")
-        for r in fx.itertuples(index=False):
-            if r.home not in model.teams or r.away not in model.teams:
-                continue
-            p = mkt.predict_fixture(model, r.home, r.away,
-                                    neutral=bool(r.neutral))["1x2"]
-            line = "  ".join(
-                f"{s}: p={p[s]:.3f} fair={1/p[s]:.2f} take>={1.02/p[s]:.2f}"
-                for s in ("home", "draw", "away"))
-            print(f"  {r.date} {r.home} v {r.away}:  {line}")
+    fx = pd.read_csv(FIXTURES_SLATE)
 
-    print("\nNOTE: the value card here is point-estimate. For stake tiering")
-    print("gated on rating uncertainty, feed the same config into")
-    print("worldcup_mc.value.bootstrap_models + price_fixture (B refits).")
+    # --- bootstrap an ensemble ONCE (B refits, shared across all fixtures) ---
+    # This is what puts a confidence interval on every probability, so we can
+    # show the uncertainty-adjusted price next to the naive fair odds.
+    print(f"\nbootstrapping {N_BOOT} model refits for the CI "
+          "(this is the slow part)...")
+    models = val.bootstrap_models(
+        history, asof=ASOF, n_boot=N_BOOT,
+        half_life_days=cfg["half_life_days"],
+        friendly_weight=cfg["friendly_weight"], ridge=cfg["ridge"])
+
+    print(f"\n--- PRICE-TARGET CARD ({CI:.0%} CI, no bookmaker odds needed) ---")
+    print("Take the bet when the price you can find is at or above the "
+          "threshold.")
+    print("  fair_odds      = 1 / model_prob              (break-even if the "
+          "model is exactly right)")
+    print(f"  min_take_fair  = fair_odds with a {EV_SMALL:.0%} EV cushion "
+          "on the point estimate")
+    print(f"  min_take_safe  = priced off the {CI:.0%}-CI LOW prob with a "
+          f"{EV_BIG:.0%} cushion  (survives model uncertainty)")
+    print("  gap            = how much extra price the uncertainty margin "
+          "demands\n")
+
+    rows = []
+    for r in fx.itertuples(index=False):
+        if r.home not in models[0].teams or r.away not in models[0].teams:
+            print(f"  skip {r.home} v {r.away}: team missing from fit")
+            continue
+        targets = val.fixture_targets(
+            models, r.home, r.away, neutral=bool(r.neutral),
+            ci=CI, ev_small=EV_SMALL, ev_big=EV_BIG)
+        for t in targets:
+            rows.append({
+                "date": r.date,
+                "match": f"{r.home} v {r.away}",
+                "market": t.market,
+                "sel": t.selection,
+                "p_model": round(t.p_model, 4),
+                "p_lo": round(t.p_lo, 4),
+                "p_hi": round(t.p_hi, 4),
+                "fair_odds": t.fair_odds,
+                "min_take_fair": t.min_odds_small,
+                "min_take_safe": t.min_odds_big,
+                "gap": round(t.min_odds_big - t.min_odds_small, 2),
+            })
+
+    if not rows:
+        print("  no fixtures could be priced (teams missing from the fit?)")
+        return
+
+    card = pd.DataFrame(rows)
+    print(card.to_string(index=False))
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    out_csv = os.path.join(
+        OUT_DIR, f"price_targets_{datetime.now():%Y%m%d_%H%M%S}.csv")
+    card.to_csv(out_csv, index=False)
+    print(f"\nprice-target card written to {out_csv}")
+    print("\nHow to use it: shop around. If any book offers a price >= "
+          "min_take_safe,")
+    print("that's a confident bet; between min_take_fair and min_take_safe is "
+          "a thin/")
+    print("small-stake bet; below min_take_fair, pass. Wide gap = the model "
+          "isn't sure")
+    print("about that team yet (few games), so it demands a bigger margin "
+          "before betting.")
+
+
+CONFIG_PATH = "worldcup_mc/data/tuned_config.json"
+
+
+def save_config(cfg, table=None):
+    """Persist the chosen config so pricing can run without re-tuning."""
+    payload = {"config": cfg, "tuned_on": str(date.today())}
+    if table is not None:
+        # keep a tiny audit trail of what won and by how much
+        best = table.iloc[0].to_dict()
+        payload["winning_row"] = {k: (float(v) if isinstance(v, (int, float))
+                                      else v) for k, v in best.items()}
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"\nconfig saved to {CONFIG_PATH} -- "
+          "run `python price.py` to price fixtures without re-tuning.")
 
 
 def main():
@@ -283,6 +305,7 @@ def main():
 
     cfg, table = stage1_tune(history)
     table.to_csv(os.path.join(OUT_DIR, "sweep_table.csv"), index=False)
+    save_config(cfg, table)          # <-- written here, before the slow stages
     stage2_holdout(history, cfg)
     stage3_bet(history, cfg)
 
