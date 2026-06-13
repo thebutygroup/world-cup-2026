@@ -52,6 +52,7 @@ def bootstrap_models(
     ridge: float = 0.05,
     min_history_date: str | None = "2010-01-01",
     seed: int = 0,
+    use_confederation_prior: bool = False,
 ):
     """
     Resample the pre-`asof` history with replacement and refit Dixon-Coles
@@ -76,7 +77,7 @@ def bootstrap_models(
         samp = train.iloc[idx].reset_index(drop=True)
         w = compute_weights(samp, asof=asof, half_life_days=half_life_days,
                             friendly_weight=friendly_weight)
-        fit = fit_dixon_coles(samp, w, ridge=ridge)
+        fit = fit_dixon_coles(samp, w, ridge=ridge, use_confederation_prior=use_confederation_prior)
         models.append(fit.to_match_model())
     return models
 

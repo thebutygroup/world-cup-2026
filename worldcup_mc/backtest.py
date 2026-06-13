@@ -112,6 +112,7 @@ def backtest(
     min_matches_per_team: int = 3,
     warm_start: bool = True,
     refit_interval_days: float = 0.0,
+    use_confederation_prior: bool = False,
     verbose: bool = False,
 ) -> BacktestResult:
     """
@@ -185,7 +186,8 @@ def backtest(
             w = compute_weights(train, asof=date, half_life_days=half_life_days,
                                 friendly_weight=friendly_weight)
             fit = fit_dixon_coles(train, w, ridge=ridge,
-                                  warm_start=prev_fit if warm_start else None)
+                                  warm_start=prev_fit if warm_start else None,
+                                  use_confederation_prior=use_confederation_prior)
             if warm_start:
                 prev_fit = fit
             model = fit.to_match_model()

@@ -138,26 +138,40 @@ class FitResult:
     rho: float
     n_matches: int
     loglik: float
+    conf_strength: dict[str, float] | None = None
 
     def write_ratings_csv(self, path: str, groups: dict[str, str] | None = None) -> None:
+        from .confederations import confederation_of
         rows = []
         for t in self.teams:
             row = {"name": t, "attack": round(self.attack[t], 4),
                    "defence": round(self.defence[t], 4)}
+            if self.conf_strength is not None:
+                row["conf_off"] = round(
+                    self.conf_strength.get(confederation_of(t), 0.0), 4)
             if groups is not None:
                 row["group"] = groups.get(t, "")
             rows.append(row)
         pd.DataFrame(rows).to_csv(path, index=False)
 
     def write_params(self, path: str) -> None:
+        payload = {"base": self.base, "home_adv": self.home_adv,
+                   "rho": self.rho, "n_matches": self.n_matches,
+                   "loglik": self.loglik}
+        if self.conf_strength is not None:
+            payload["conf_strength"] = self.conf_strength
         with open(path, "w") as f:
-            json.dump({"base": self.base, "home_adv": self.home_adv,
-                       "rho": self.rho, "n_matches": self.n_matches,
-                       "loglik": self.loglik}, f, indent=2)
+            json.dump(payload, f, indent=2)
 
     def to_match_model(self, **kwargs):
         from .model import Team, MatchModel
-        teams = {t: Team(t, self.attack[t], self.defence[t]) for t in self.teams}
+        from .confederations import confederation_of
+        cs = self.conf_strength or {}
+        teams = {
+            t: Team(t, self.attack[t], self.defence[t],
+                    conf_off=cs.get(confederation_of(t), 0.0))
+            for t in self.teams
+        }
         return MatchModel(teams, base=self.base, home_adv=self.home_adv,
                           rho=self.rho, **kwargs)
 
@@ -184,6 +198,7 @@ def fit_dixon_coles(
     verbose: bool = False,
     warm_start: "FitResult | None" = None,
     maxiter: int = 500,
+    use_confederation_prior: bool = False,
 ) -> FitResult:
     """
     Weighted-MLE fit. Returns centred attack/defence (mean 0), a base rate,
@@ -196,10 +211,40 @@ def fit_dixon_coles(
     the cold-start iterations. The centred parameters are likelihood-
     equivalent to the raw optimum (the centring shift cancels inside
     base + attack - defence), so they are a valid initialisation.
+
+    use_confederation_prior: adds one explicit strength-offset parameter per
+    confederation to the likelihood, entering every match as the DIFFERENCE
+    between the two sides' offsets. Within-region games are untouched (the
+    difference is zero), so each team's attack/defence stays identified by
+    regional play; the offsets are identified purely by cross-region games
+    and put the regions on one absolute scale. Without this, "best team in a
+    weak region" and "strong in absolute terms" are confounded because the
+    fit can't tell how strong the region's opposition was. The cross-confederation
+    games (World Cups, playoffs, friendlies) set where each confederation mean
+    sits, so a team in a weak confederation is pulled toward a weaker baseline.
     """
     teams = sorted(set(df["home_team"]) | set(df["away_team"]))
     idx = {t: i for i, t in enumerate(teams)}
     n = len(teams)
+
+    # confederation strength offsets: one scalar per confederation, shared by
+    # all its teams, identified by CROSS-confederation games. This puts the
+    # regions on a common absolute scale -- within-region games identify each
+    # team's attack/defence relative to its peers, cross-region games identify
+    # how strong the whole region is. Without this, "best in a weak region"
+    # and "strong in absolute terms" are indistinguishable.
+    n_conf = 0
+    conf_home_i = conf_away_i = None
+    if use_confederation_prior:
+        from .confederations import confederation_of
+        team_conf = [confederation_of(t) for t in teams]
+        uniq = sorted(set(team_conf))
+        n_conf = len(uniq)
+        ci = {c: j for j, c in enumerate(uniq)}
+        team_conf_idx = np.array([ci[c] for c in team_conf])
+        conf_home_i = team_conf_idx[df["home_team"].map(idx).to_numpy()]
+        conf_away_i = team_conf_idx[df["away_team"].map(idx).to_numpy()]
+        _conf_names = uniq
 
     hi = df["home_team"].map(idx).to_numpy()
     ai = df["away_team"].map(idx).to_numpy()
@@ -208,17 +253,29 @@ def fit_dixon_coles(
     home_flag = (~df["neutral"].to_numpy()).astype(float)
     w = np.asarray(weights, dtype=float)
 
-    # theta = [attack(n), defence(n), base, home_adv, rho]
+    # theta = [attack(n), defence(n), base, home_adv, rho, conf_str(n_conf)]
+    # conf_str entries are absolute regional strength offsets; they only enter
+    # via the DIFFERENCE between the two teams' confederations, so they vanish
+    # for within-region games and are identified purely by cross-region games.
     def unpack(theta):
         atk = theta[:n]
         dfc = theta[n:2 * n]
         base, gamma, rho = theta[2 * n], theta[2 * n + 1], theta[2 * n + 2]
-        return atk, dfc, base, gamma, rho
+        cstr = theta[2 * n + 3:2 * n + 3 + n_conf] if n_conf else None
+        return atk, dfc, base, gamma, rho, cstr
 
     def nll(theta):
-        atk, dfc, base, gamma, rho = unpack(theta)
-        log_lam = base + atk[hi] - dfc[ai] + gamma * home_flag
-        log_mu = base + atk[ai] - dfc[hi]
+        atk, dfc, base, gamma, rho, cstr = unpack(theta)
+        if cstr is not None:
+            # relative confederation strength enters each side's scoring rate:
+            # a stronger region scores more / concedes less in cross-region games
+            ch = cstr[conf_home_i]
+            ca = cstr[conf_away_i]
+            log_lam = base + atk[hi] - dfc[ai] + gamma * home_flag + (ch - ca)
+            log_mu = base + atk[ai] - dfc[hi] + (ca - ch)
+        else:
+            log_lam = base + atk[hi] - dfc[ai] + gamma * home_flag
+            log_mu = base + atk[ai] - dfc[hi]
         lam = np.exp(log_lam)
         mu = np.exp(log_mu)
         ll = (_dc_tau_log(x, y, lam, mu, rho)
@@ -226,9 +283,14 @@ def fit_dixon_coles(
               + y * log_mu - mu)
         neg = -np.sum(w * ll)
         neg += ridge * (np.dot(atk, atk) + np.dot(dfc, dfc))  # shrink + identify
+        if cstr is not None:
+            # light anchor on offsets: keeps them 0 unless cross-region games
+            # provide real evidence (and pins the overall mean for identifiability)
+            neg += ridge * np.dot(cstr, cstr)
         return neg
 
-    theta0 = np.zeros(2 * n + 3)
+    n_par = 2 * n + 3 + n_conf
+    theta0 = np.zeros(n_par)
     theta0[2 * n] = math.log(max(df[["home_score", "away_score"]].to_numpy().mean(), 0.3))
     theta0[2 * n + 1] = 0.25   # home_adv start
     theta0[2 * n + 2] = -0.05  # rho start
@@ -242,17 +304,34 @@ def fit_dixon_coles(
         theta0[2 * n] = warm_start.base
         theta0[2 * n + 1] = min(max(warm_start.home_adv, 0.0), max_home_adv)
         theta0[2 * n + 2] = min(max(warm_start.rho, -0.2), 0.2)
+        if n_conf and getattr(warm_start, "conf_strength", None):
+            for c, j in ((c, j) for j, c in enumerate(_conf_names)):
+                theta0[2 * n + 3 + j] = warm_start.conf_strength.get(c, 0.0)
 
-    bounds = [(None, None)] * (2 * n) + [(None, None), (0.0, max_home_adv), (-0.2, 0.2)]
+    bounds = ([(None, None)] * (2 * n)
+              + [(None, None), (0.0, max_home_adv), (-0.2, 0.2)]
+              + [(None, None)] * n_conf)
     res = minimize(nll, theta0, method="L-BFGS-B", bounds=bounds,
                    options={"maxiter": maxiter, "disp": verbose})
 
-    atk, dfc, base, gamma, rho = unpack(res.x)
+    atk, dfc, base, gamma, rho, cstr = unpack(res.x)
     # centre for interpretability, folding the means into base
     a_mean, d_mean = atk.mean(), dfc.mean()
     base = base + a_mean - d_mean
     atk = atk - a_mean
     dfc = dfc - d_mean
+
+    conf_strength = None
+    if cstr is not None:
+        # centre offsets to mean 0 (identifiability: only differences matter).
+        # NOTE: offsets are NOT folded into attack/defence -- the likelihood
+        # applies them as a per-match difference between the two sides'
+        # confederations, and no attack/defence adjustment reproduces that
+        # (folding either cancels in net rating or double-counts; both were
+        # bugs in earlier attempts). They stay a separate term that
+        # MatchModel applies at prediction time via Team.conf_off.
+        cstr = cstr - cstr.mean()
+        conf_strength = {c: float(cstr[j]) for j, c in enumerate(_conf_names)}
 
     return FitResult(
         teams=teams,
@@ -260,4 +339,5 @@ def fit_dixon_coles(
         defence={t: float(dfc[idx[t]]) for t in teams},
         base=float(base), home_adv=float(gamma), rho=float(rho),
         n_matches=int(len(df)), loglik=float(-res.fun),
+        conf_strength=conf_strength,
     )

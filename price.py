@@ -71,7 +71,8 @@ def load_config(path: str) -> dict:
 
 
 def price(cfg: dict, asof: str, n_boot: int, ci: float,
-          ev_small: float, ev_big: float, min_history: str):
+          ev_small: float, ev_big: float, min_history: str,
+          use_confederation_prior: bool = False):
     history = load_results(RESULTS, min_date=min_history)
     print(f"loaded {len(history):,} matches "
           f"({history['date'].min().date()}..{history['date'].max().date()})")
@@ -86,7 +87,11 @@ def price(cfg: dict, asof: str, n_boot: int, ci: float,
     w = compute_weights(history, asof=asof,
                         half_life_days=cfg["half_life_days"],
                         friendly_weight=cfg["friendly_weight"])
-    fit = fit_dixon_coles(history, w, ridge=cfg["ridge"])
+    fit = fit_dixon_coles(history, w, ridge=cfg["ridge"],
+                          use_confederation_prior=use_confederation_prior)
+    if fit.conf_strength:
+        print("confederation offsets:",
+              {k: round(v, 3) for k, v in sorted(fit.conf_strength.items())})
     fit.write_ratings_csv("worldcup_mc/data/teams_fitted.csv")
     fit.write_params("worldcup_mc/data/params_fitted.json")
     print(f"fit {len(fit.teams)} teams as of {asof} | "
@@ -96,7 +101,8 @@ def price(cfg: dict, asof: str, n_boot: int, ci: float,
     models = val.bootstrap_models(
         history, asof=asof, n_boot=n_boot,
         half_life_days=cfg["half_life_days"],
-        friendly_weight=cfg["friendly_weight"], ridge=cfg["ridge"])
+        friendly_weight=cfg["friendly_weight"], ridge=cfg["ridge"],
+        use_confederation_prior=use_confederation_prior)
 
     print(f"\n--- PRICE-TARGET CARD ({ci:.0%} CI, no bookmaker odds needed) ---")
     print("Take the bet when the price you can find is at or above the "
@@ -145,13 +151,17 @@ def main():
     ap.add_argument("--ev-small", type=float, default=DEFAULTS["ev_small"])
     ap.add_argument("--ev-big", type=float, default=DEFAULTS["ev_big"])
     ap.add_argument("--min-history", default=DEFAULTS["min_history"])
+    ap.add_argument("--no-conf-prior", action="store_true",
+                    help="disable confederation strength offsets (on by default; "
+                         "validated across folds to remove weak-region bias)")
     ap.add_argument("--config", default=CONFIG_PATH)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     price(cfg, asof=args.asof, n_boot=args.n_boot, ci=args.ci,
           ev_small=args.ev_small, ev_big=args.ev_big,
-          min_history=args.min_history)
+          min_history=args.min_history,
+          use_confederation_prior=not args.no_conf_prior)
 
 
 if __name__ == "__main__":

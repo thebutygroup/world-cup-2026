@@ -94,8 +94,12 @@ else:
     QUALS_CAP = 0                        # 0 = use the whole fold
 
 # walk-forward economy: warm starts everywhere; long qualifier windows
-# refit every 14 days instead of every matchday (still strictly past-only)
-BT = dict(warm_start=True)
+# refit every 14 days instead of every matchday (still strictly past-only).
+# use_confederation_prior=True adds regional strength offsets -- validated
+# across folds (3/4 won, pooled 95% CI excluded zero) to remove the
+# weak-region-overrating bias. Set False to disable.
+BT = dict(warm_start=True, use_confederation_prior=True)
+USE_CONF_PRIOR = BT["use_confederation_prior"]   # Stage 3 uses the same switch
 
 MIN_FOLDS_WON_FRAC = 0.5
 RICHNESS_THRESHOLD = 15
@@ -240,9 +244,13 @@ def stage3_bet(history, cfg):
     w = compute_weights(history, asof=ASOF, **{
         "half_life_days": cfg["half_life_days"],
         "friendly_weight": cfg["friendly_weight"]})
-    fit = fit_dixon_coles(history, w, ridge=cfg["ridge"])
+    fit = fit_dixon_coles(history, w, ridge=cfg["ridge"],
+                          use_confederation_prior=USE_CONF_PRIOR)
     print(f"fit {len(fit.teams)} teams on {fit.n_matches:,} matches | "
           f"base={fit.base:.3f} home_adv={fit.home_adv:.3f} rho={fit.rho:.3f}")
+    if fit.conf_strength:
+        print("  confederation offsets:",
+              {k: round(v, 3) for k, v in sorted(fit.conf_strength.items())})
     fit.write_ratings_csv("worldcup_mc/data/teams_fitted.csv")
     fit.write_params("worldcup_mc/data/params_fitted.json")
 
@@ -261,7 +269,8 @@ def stage3_bet(history, cfg):
     models = val.bootstrap_models(
         history, asof=ASOF, n_boot=N_BOOT,
         half_life_days=cfg["half_life_days"],
-        friendly_weight=cfg["friendly_weight"], ridge=cfg["ridge"])
+        friendly_weight=cfg["friendly_weight"], ridge=cfg["ridge"],
+        use_confederation_prior=USE_CONF_PRIOR)
 
     print(f"\n--- PRICE-TARGET CARD ({CI:.0%} CI, no bookmaker odds needed) ---")
     print("Take the bet when the price you can find is at or above the "

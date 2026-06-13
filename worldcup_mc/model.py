@@ -43,6 +43,10 @@ class Team:
     group: str | None = None
     cohesion_mult: float = 1.0  # attacking multiplier from the SoT/wage signal; 1.0 = off
     def_cohesion_mult: float = 1.0  # defensive multiplier (scales OPPONENT's goal rate); 1.0 = off
+    conf_off: float = 0.0  # confederation strength offset (log-rate units); 0.0 = off.
+    # Applied per-match as the DIFFERENCE between the two sides' offsets, so it
+    # vanishes for same-confederation games and shifts cross-confederation
+    # games by how strong each region has proven in inter-regional results.
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,7 @@ class Surface:
 
 
 def load_teams(path: str) -> dict[str, Team]:
-    """Load a CSV with columns: name, attack, defence, [group]."""
+    """Load a CSV with columns: name, attack, defence, [group], [conf_off]."""
     df = pd.read_csv(path)
     required = {"name", "attack", "defence"}
     missing = required - set(df.columns)
@@ -97,6 +101,7 @@ def load_teams(path: str) -> dict[str, Team]:
             attack=float(row.attack),
             defence=float(row.defence),
             group=getattr(row, "group", None),
+            conf_off=float(getattr(row, "conf_off", 0.0) or 0.0),
         )
     return teams
 
@@ -143,10 +148,15 @@ class MatchModel:
                 surface: "Surface | None" = None) -> tuple[float, float]:
         h, a = self.teams[home], self.teams[away]
         adv = 0.0 if neutral else self.home_adv
+        # Confederation offset: mirrors the fit likelihood exactly. The home
+        # rate gets (h.conf_off - a.conf_off), the away rate the negation, so
+        # the term is zero within a confederation and shifts cross-region
+        # matchups by the fitted regional strength gap.
+        co = h.conf_off - a.conf_off
         # own cohesion_mult scales own attack; opponent's def_cohesion_mult
         # scales how much you score against them (good defence -> <1).
-        lam_h = math.exp(self.base + h.attack - a.defence + adv) * h.cohesion_mult * a.def_cohesion_mult
-        lam_a = math.exp(self.base + a.attack - h.defence) * a.cohesion_mult * h.def_cohesion_mult
+        lam_h = math.exp(self.base + h.attack - a.defence + adv + co) * h.cohesion_mult * a.def_cohesion_mult
+        lam_a = math.exp(self.base + a.attack - h.defence - co) * a.cohesion_mult * h.def_cohesion_mult
         if surface is not None and not surface.is_identity:
             Lh, La = math.log(lam_h), math.log(lam_a)
             m = 0.5 * (Lh + La)
